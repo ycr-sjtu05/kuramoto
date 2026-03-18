@@ -1,0 +1,19 @@
+# 1. 忽略软连接和大数据目录
+data/
+wandb/
+fid_stats/
+experiments/
+data
+# 2. 忽略 Python 自动生成的缓存
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 3. 忽略可能的日志文件
+*.log
+
+# 4. 忽略隐藏的系统文件
+.DS_Store
+.ipynb_checkpoints/
+
+# 注意：根据你的描述，datasets, configs, core, models, scripts, utils.py 等会被保留上传
