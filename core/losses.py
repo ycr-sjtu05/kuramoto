@@ -1,67 +1,86 @@
 import torch
 import torch.nn.functional as F
+from core.epsilon_provider import build_epsilon_provider
+
 
 class DecoupledInterpolantLoss:
     """
     解耦的流匹配与分数匹配联合损失函数。
     彻底抛弃了 Wrapped Gaussian 和蒙特卡洛多重采样。
     """
-    def __init__(self, interpolant_engine, lambda_E=1.0, time_scale=1000.0):
-        """
-        Args:
-            interpolant_engine: 我们之前写的数学枢纽 (InterpolantEngine)
-            lambda_E: 平衡速度网络 (D) 和噪声网络 (E) Loss 的权重。通常设为 1.0 即可。
-            time_scale: 因为我们采样的 t 是 (0, 1) 的连续实数，而原版 U-Net 的 
-                        Sinusoidal Positional Encoding 习惯接收大数值 (如 0~1000)。
-                        这个缩放因子可以保证网络时间特征提取的正常运作。
-        """
+    def __init__(
+        self,
+        interpolant_engine,
+        lambda_E=1.0,
+        time_scale=1000.0,
+        epsilon_mode="fresh",
+        epsilon_seed=12345,
+        time_mode="continuous",
+        num_time_bins=16,
+    ):
         self.engine = interpolant_engine
         self.lambda_E = lambda_E
         self.time_scale = time_scale
 
-    def __call__(self, model_D, model_E, snapshots):
+        self.epsilon_mode = epsilon_mode
+        self.epsilon_provider = build_epsilon_provider(
+            mode=epsilon_mode,
+            base_seed=epsilon_seed,
+        )
+
+        self.time_mode = time_mode
+        self.num_time_bins = num_time_bins
+
+    def _sample_t(self, B, device):
+        if self.time_mode == "continuous":
+            return torch.rand((B,), device=device)
+
+        if self.time_mode == "grid":
+            # 采样 bin 中心，避免精确落在 0 或 1
+            # t in {(0.5/K), (1.5/K), ..., ((K-0.5)/K)}
+            bins = torch.randint(0, self.num_time_bins, (B,), device=device)
+            t = (bins.float() + 0.5) / self.num_time_bins
+            return t
+
+        raise ValueError(f"不支持的 time_mode: {self.time_mode}")
+
+    def __call__(self, model_D, model_E, snapshots, sample_ids=None):
         """
-        计算单步的联合 Loss。
-        
         Args:
             model_D: 预测物理结构漂移的网络
             model_E: 预测高斯噪声的网络
-            snapshots: DataLoader 读出来的无界展开快照，Shape: (B, N, C, H, W)
-            
-        Returns:
-            loss: 总损失
-            loss_dict: 包含各自分项的字典，方便记录到 WandB
+            snapshots: Shape (B, N, C, H, W)
+            sample_ids: 当 epsilon_mode=fixed_per_sample 时必须提供
         """
         B, _, C, H, W = snapshots.shape
         device = snapshots.device
+        dtype = snapshots.dtype
 
-        # 1. 采样时间 t ~ U(0, 1) 和纯高斯噪声 epsilon ~ N(0, I)
-        t = torch.rand((B,), device=device)
-        epsilon = torch.randn((B, C, H, W), device=device)
+        # 1. 采样时间 t
+        t = self._sample_t(B, device)
 
-        # 2. 从数学引擎中获取终极真理 (Targets) 与当前带噪状态 (x_t)
-        # x_t 也是定义在无限实数轴上的展开角度
+        # 2. epsilon 由 provider 决定
+        epsilon = self.epsilon_provider(
+            sample_ids=sample_ids,
+            shape=(B, C, H, W),
+            device=device,
+            dtype=dtype,
+        )
+
+        # 3. 构造 x_t 与 targets
         x_t, target_D, target_E = self.engine.get_train_targets(snapshots, t, epsilon)
 
-        # 3. 缩放时间 t 喂给网络 (适配原版 U-Net 的周期嵌入)
+        # 4. 网络前向
         t_model = t * self.time_scale
-
-        # 4. 网络前向传播
-        # 注意：原版 modules.py 里的 U-Net 已经在内部第一层做了 
-        # x = torch.cat([x.cos(), x.sin()], dim=1)
-        # 所以我们直接把 x_t 扔进去，网络绝不会发生 2pi 溢出的困惑！
         pred_D = model_D(x_t, t_model)
         pred_E = model_E(x_t, t_model)
 
-        # 5. 暴力极简的 MSE 损失
-        # 没有任何概率密度的对数计算，就是最纯粹的向量回归
+        # 5. MSE loss
         loss_D = F.mse_loss(pred_D, target_D)
         loss_E = F.mse_loss(pred_E, target_E)
 
-        # 6. 组合总损失
         total_loss = loss_D + self.lambda_E * loss_E
 
-        # 打包以便于监控
         loss_dict = {
             "loss_total": total_loss.item(),
             "loss_D_drift": loss_D.item(),

@@ -7,31 +7,36 @@ class SnapshotDataset(Dataset):
     专门用于读取离线生成的 Kuramoto 物理快照的极速数据加载器。
     它不处理任何图像解码或 Augmentation，只负责极致的 I/O 读取。
     """
-    def __init__(self, snapshot_dir):
+    def __init__(self, snapshot_dir, return_index=False):
         super().__init__()
         self.snapshot_dir = snapshot_dir
-        
+        self.return_index = return_index
+
         # 扫描目录下所有的 .pt 文件并按字典序排序
-        # 这样确保每次打乱 (shuffle) 前的索引是固定可复现的
         self.file_names = sorted([f for f in os.listdir(snapshot_dir) if f.endswith('.pt')])
-        
+
         if len(self.file_names) == 0:
-            raise ValueError(f"在 {snapshot_dir} 目录下没有找到任何 .pt 文件！\n"
-                             f"请务必先运行 scripts/generate_snapshots.py 生成离线快照。")
+            raise ValueError(
+                f"在 {snapshot_dir} 目录下没有找到任何 .pt 文件！\n"
+                f"请务必先运行 scripts/generate_snapshots.py 生成离线快照。"
+            )
 
     def __len__(self):
         return len(self.file_names)
 
     def __getitem__(self, idx):
         file_path = os.path.join(self.snapshot_dir, self.file_names[idx])
+
+        # 直接使用 torch.load 加载张量
         snapshots = torch.load(file_path, weights_only=True)
-        
+
+        # snapshots shape: (N_snapshots, C, H, W)
         if self.return_index:
             return snapshots, idx
         return snapshots
 
 
-# ==========================================
+#=========================
 # 测试代码 (可以独立运行本文件测试)
 # ==========================================
 if __name__ == "__main__":

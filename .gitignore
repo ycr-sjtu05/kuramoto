@@ -11,6 +11,8 @@ __pycache__/
 
 # 3. 忽略可能的日志文件
 *.log
+logs/
+analysis/
 
 # 4. 忽略隐藏的系统文件
 .DS_Store

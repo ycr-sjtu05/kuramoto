@@ -3,6 +3,8 @@ import copy
 import torch
 import wandb
 import argparse
+import random
+import numpy as np
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 
@@ -17,8 +19,20 @@ from sample import KuramotoSampler, DualHeadModel
 from utils import map_to_image
 import torchvision
 
+
+def seed_everything(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def train_interpolant(args):
     device = args.device
+    seed_everything(args.seed)
     
     # 1. 初始化 WandB 实验追踪
     wandb.init(
@@ -33,12 +47,33 @@ def train_interpolant(args):
 
     # 2. 挂载极速离线快照数据流
     print(f"Loading snapshots from: {args.snapshot_dir}")
-    dataset = SnapshotDataset(args.snapshot_dir)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
+    
+
+    need_sample_ids = (args.epsilon_mode == "fixed_per_sample")
+    dataset = SnapshotDataset(args.snapshot_dir, return_index=need_sample_ids)
+
+    loader_generator = torch.Generator()
+    loader_generator.manual_seed(args.seed)
+
+    dataloader = DataLoader(
+        dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        drop_last=True,
+        generator=loader_generator,
+    )
     
     # 3. 实例化数学引擎与 Loss
     engine = InterpolantEngine(num_snapshots=args.num_snapshots, sigma_max=args.sigma_max, device=device)
-    criterion = DecoupledInterpolantLoss(interpolant_engine=engine, lambda_E=args.lambda_E)
+    criterion = DecoupledInterpolantLoss(
+        interpolant_engine=engine,
+        lambda_E=args.lambda_E,
+        epsilon_mode=args.epsilon_mode,
+        epsilon_seed=args.epsilon_seed,
+        time_mode=args.time_mode,
+        num_time_bins=args.num_time_bins,
+    )
     
     # 4. 实例化双头网络 (D: 结构漂移, E: 高频去噪)
     print("Initializing Model D (Drift) and Model E (Noise)...")
@@ -68,11 +103,21 @@ def train_interpolant(args):
         model_E.train()
         
         pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{args.epochs}")
-        for step, snapshots in enumerate(pbar):
+        for step, batch in enumerate(pbar):
+            if isinstance(batch, (list, tuple)) and len(batch) == 2:
+                snapshots, sample_ids = batch
+            else:
+                snapshots = batch
+                sample_ids = None
+
             snapshots = snapshots.to(device).float()
-            
-            # 核心：一行代码算完所有的数学投影和 Loss！
-            loss, loss_dict = criterion(model_D, model_E, snapshots)
+
+            loss, loss_dict = criterion(
+                model_D,
+                model_E,
+                snapshots,
+                sample_ids=sample_ids,
+            )
             
             # 反向传播与参数更新
             opt_D.zero_grad()
@@ -157,6 +202,17 @@ if __name__ == '__main__':
     parser.add_argument("--eval_freq", type=int, default=10, help="每隔多少 Epoch 在 WandB 上生成一次图片")
     parser.add_argument("--save_freq", type=int, default=200, help="每隔多少 Epoch 保存一次权重")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    
+    parser.add_argument("--epsilon_mode", type=str, default="fresh",
+                        choices=["fresh", "fixed_per_sample"],
+                        help="fresh: 每步重新采样 epsilon; fixed_per_sample: 每张图固定 epsilon")
+    parser.add_argument("--epsilon_seed", type=int, default=12345,
+                        help="fixed_per_sample 模式下用于生成固定 epsilon 的基准种子")
+    parser.add_argument("--seed", type=int, default=3407,
+                        help="训练过程的全局随机种子")
+    parser.add_argument("--time_mode", type=str, default="continuous",
+                        choices=["continuous", "grid"],
+                        help="continuous: t~U(0,1); grid: 从固定时间网格中心采样")
+    parser.add_argument("--num_time_bins", type=int, default=16,
+                        help="time_mode=grid 时使用的时间 bin 数")
     args = parser.parse_args()
     train_interpolant(args)

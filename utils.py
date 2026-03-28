@@ -74,6 +74,19 @@ def get_data(args):
             transform=transforms.Compose(transform_list)
         )
         
+    elif args.dataset_name == "alot":
+        # ALOT 是 3 通道 RGB 图像
+        transform_list.append(transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]))
+
+        if not os.path.exists(args.dataset_path):
+            raise FileNotFoundError(f"找不到数据集路径: {args.dataset_path}")
+
+        dataset = ImageFolder(
+            root=args.dataset_path,
+            transform=transforms.Compose(transform_list)
+        )
+        
+        
     else:
         raise ValueError(f"不支持的数据集类型: {args.dataset_name}")
 

@@ -1,12 +1,12 @@
 import os
+import sys
 import torch
 import torch.nn.functional as F
 import numpy as np
 from tqdm import tqdm
 import argparse
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-# 假设你的目录结构，这里导入原版的工具函数
-# 如果你的 utils.py 在上一级目录，可能需要 sys.path.append('..')
 from utils import get_data
 # 从原版代码中提取的辅助函数
 def map_to_phase(x):
